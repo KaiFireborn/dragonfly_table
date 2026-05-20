@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta
       name="description"
-      content="Dragonfly Tables helps track weekly exercise goals with local JSON-backed storage."
+      content="Dragonfly Tables helps track weekly exercise goals with local SQLite-backed storage."
     />
     <meta name="theme-color" content="#ffffff" />
     <title>Dragonfly Tables</title>
@@ -160,7 +160,7 @@
       /> -->
       <!-- <button id="createCustomWeekBtn" type="button">Create custom week</button> -->
       <button id="createWeekBtn" type="button">Create current week</button>
-      <button id="backupBtn" type="button">Export backup JSON</button>
+      <button id="backupBtn" type="button">Export JSON</button>
     </div>
 
     <div id="tablesRoot"></div>
@@ -256,28 +256,25 @@
       }
 
       function exportBackup() {
-        const backup = {
-          exportedAt: new Date().toISOString(),
-          app: "Dragonfly Tables",
-          currentWeek,
-          weeks: sortWeeks(allWeeks()),
-          workbooks: workbooks.map((workbook) => ({
-            id: workbook.id,
-            userId: workbook.userId,
-            label: workbook.label,
-            db: workbook.db,
-          })),
-        };
+        const response = await api("/export.json");
+        const text = await response.text();
+        if (response.status === 401) {
+          resetLoggedOutState("Session expired. Log in again.");
+          return;
+        }
+        if (!response.ok) {
+          let message = "Could not export JSON";
+          try {
+            const result = JSON.parse(text);
+            message = result.message || message;
+          } catch {
+            // Keep fallback message.
+          }
+          throw new Error(message);
+        }
 
-        const stamp = new Date()
-          .toISOString()
-          .replaceAll(":", "-")
-          .replaceAll(".", "-");
-        downloadTextFile(
-          `dragonfly-backup-${stamp}.json`,
-          JSON.stringify(backup, null, 2),
-        );
-        setMessage("Backup JSON downloaded.");
+        downloadTextFile("export.json", text);
+        setMessage("export.json downloaded.");
       }
 
       function setMessage(text) {
@@ -903,10 +900,10 @@
         const response = await api("/api/workbooks", {
           method: "PUT",
           body: JSON.stringify({
-            workbooks: workbooks.map((item) => ({
-              userId: item.userId,
-              db: item.db,
-            })),
+            workbook: {
+              userId: workbook.userId,
+              db: workbook.db,
+            },
           }),
         });
         const result = await response.json();

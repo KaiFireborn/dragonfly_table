@@ -17,7 +17,17 @@ pb_data/
 *.log
 .DS_Store
 
+# Python caches
+__pycache__/
+*.pyc
+.pytest_cache/
+*.egg-info/
 
-README.md
+# Virtual environments
+.venv/
+venv/
 
+# Data and backups
 data/
+
+__pycache__/

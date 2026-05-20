@@ -8,7 +8,8 @@ import mimetypes
 import os
 import re
 import secrets
-import threading
+import sqlite3
+from datetime import datetime, timezone
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -16,17 +17,43 @@ from typing import Any
 from urllib.parse import urlparse
 
 ROOT = Path(__file__).resolve().parent
-DATA_FILE = ROOT / "data" / "user.json"
+DB_FILE = ROOT / "data" / "dragonfly.sqlite3"
 DEFAULT_PORT = int(os.environ.get("PORT", "1337"))
 DEFAULT_HOST = os.environ.get("HOST", "0.0.0.0")
 ITERATIONS = 210_000
 SESSION_TTL_SECONDS = 60 * 60 * 24 * 7
 USERNAME_RE = re.compile(r"^[a-zA-Z0-9._-]{2,32}$")
-STATE_LOCK = threading.Lock()
+
+
+SCHEMA = """
+PRAGMA foreign_keys = ON;
+
+CREATE TABLE IF NOT EXISTS users (
+    username TEXT PRIMARY KEY,
+    password_hash TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS workbooks (
+    username TEXT PRIMARY KEY REFERENCES users(username) ON DELETE CASCADE,
+    db_json TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS sessions (
+    token TEXT PRIMARY KEY,
+    username TEXT NOT NULL REFERENCES users(username) ON DELETE CASCADE,
+    created_at REAL NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_sessions_created_at ON sessions(created_at);
+"""
 
 
 def _now() -> float:
     return __import__("time").time()
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 def _pbkdf2_hash(password: str, salt: bytes | None = None) -> str:
@@ -67,135 +94,106 @@ def _verify_password(stored: str, password: str) -> bool:
     return hmac.compare_digest(actual, expected)
 
 
-def _legacy_users_to_state(raw_users: dict[str, Any]) -> dict[str, Any]:
-    users: dict[str, Any] = {}
-    for username, workbook in raw_users.items():
-        users[username] = {
-            "passwordHash": _pbkdf2_hash(username),
-            "db": workbook if isinstance(workbook, dict) else {},
-        }
-    return {"version": 1, "users": users}
+def _ensure_db() -> None:
+    DB_FILE.parent.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(DB_FILE) as conn:
+        conn.execute("PRAGMA foreign_keys = ON")
+        conn.executescript(SCHEMA)
 
 
-def _normalize_state(raw: Any) -> dict[str, Any]:
-    if not isinstance(raw, dict):
-        return {"version": 1, "users": {}, "sessions": {}}
-
-    users = raw.get("users")
-    sessions = raw.get("sessions")
-    if isinstance(users, dict):
-        normalized: dict[str, Any] = {}
-        changed = raw.get("version") != 1
-        for username, user_data in users.items():
-            if not isinstance(user_data, dict):
-                continue
-            password_hash = user_data.get("passwordHash")
-            db = user_data.get("db")
-            if not isinstance(password_hash, str):
-                password_hash = _pbkdf2_hash(str(username))
-                changed = True
-            if not isinstance(db, dict):
-                db = {}
-                changed = True
-            normalized[str(username)] = {
-                "passwordHash": password_hash,
-                "db": db,
-            }
-        normalized_sessions: dict[str, Any] = {}
-        cutoff = _now() - SESSION_TTL_SECONDS
-        if isinstance(sessions, dict):
-            for token, session_data in sessions.items():
-                if not isinstance(session_data, dict):
-                    changed = True
-                    continue
-                username = session_data.get("username")
-                created_at = session_data.get("createdAt")
-                if not isinstance(username, str) or not isinstance(
-                    created_at, (int, float)
-                ):
-                    changed = True
-                    continue
-                if float(created_at) < cutoff:
-                    changed = True
-                    continue
-                normalized_sessions[str(token)] = {
-                    "username": username,
-                    "createdAt": float(created_at),
-                }
-        elif sessions is not None:
-            changed = True
-
-        state = {"version": 1, "users": normalized, "sessions": normalized_sessions}
-        if changed:
-            _write_state(state)
-        return state
-
-    legacy_users = raw.get("db")
-    if isinstance(legacy_users, dict):
-        state = _legacy_users_to_state(legacy_users)
-        _write_state(state)
-        return state
-
-    return {"version": 1, "users": {}, "sessions": {}}
+def _db_connection() -> sqlite3.Connection:
+    _ensure_db()
+    conn = sqlite3.connect(DB_FILE, timeout=30)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute("PRAGMA journal_mode = WAL")
+    conn.execute("PRAGMA busy_timeout = 5000")
+    return conn
 
 
-def _load_state() -> dict[str, Any]:
-    if not DATA_FILE.exists():
-        DATA_FILE.parent.mkdir(parents=True, exist_ok=True)
-        state = {"version": 1, "users": {}, "sessions": {}}
-        _write_state(state)
-        return state
-
-    with DATA_FILE.open("r", encoding="utf-8") as handle:
-        try:
-            raw = json.load(handle)
-        except json.JSONDecodeError:
-            raw = {}
-    return _normalize_state(raw)
+def _serialize_db(db: Any) -> str:
+    if not isinstance(db, dict):
+        db = {}
+    return json.dumps(db, indent=2, sort_keys=True)
 
 
-def _write_state(state: dict[str, Any]) -> None:
-    DATA_FILE.parent.mkdir(parents=True, exist_ok=True)
-    temp_path = DATA_FILE.with_suffix(".json.tmp")
-    with temp_path.open("w", encoding="utf-8") as handle:
-        json.dump(state, handle, indent=2, sort_keys=True)
-        handle.write("\n")
-        handle.flush()
-        os.fsync(handle.fileno())
-    os.replace(temp_path, DATA_FILE)
+def _deserialize_db(raw: str | None) -> dict[str, Any]:
+    if not raw:
+        return {}
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return {}
+    return data if isinstance(data, dict) else {}
 
 
-def _state() -> dict[str, Any]:
-    with STATE_LOCK:
-        return _load_state()
-
-
-def _list_workbooks(state: dict[str, Any]) -> list[dict[str, Any]]:
-    users = state.get("users", {})
-    if not isinstance(users, dict):
-        return []
-    workbooks = []
-    for username, user_data in users.items():
-        if not isinstance(user_data, dict):
-            continue
-        workbooks.append(
-            {
-                "id": username,
-                "userId": username,
-                "label": username,
-                "db": user_data.get("db", {}),
-            }
-        )
-    return workbooks
-
-
-def _create_session(state: dict[str, Any], username: str) -> str:
+def _create_session(username: str) -> str:
     token = secrets.token_urlsafe(32)
-    state.setdefault("sessions", {})[token] = {
-        "username": username,
-        "createdAt": _now(),
-    }
+    created_at = _now()
+    with _db_connection() as conn:
+        conn.execute(
+            "DELETE FROM sessions WHERE created_at < ?",
+            (created_at - SESSION_TTL_SECONDS,),
+        )
+        conn.execute(
+            "INSERT INTO sessions (token, username, created_at) VALUES (?, ?, ?)",
+            (token, username, created_at),
+        )
     return token
+
+
+def _create_user(username: str, password: str) -> None:
+    password_hash = _pbkdf2_hash(password)
+    with _db_connection() as conn:
+        try:
+            conn.execute(
+                "INSERT INTO users (username, password_hash) VALUES (?, ?)",
+                (username, password_hash),
+            )
+        except sqlite3.IntegrityError as exc:
+            raise ValueError("Username already taken.") from exc
+        conn.execute(
+            "INSERT INTO workbooks (username, db_json) VALUES (?, ?)"
+            " ON CONFLICT(username) DO NOTHING",
+            (username, "{}"),
+        )
+
+
+def _update_workbook(username: str, db: dict[str, Any]) -> None:
+    with _db_connection() as conn:
+        conn.execute(
+            "INSERT INTO workbooks (username, db_json) VALUES (?, ?)"
+            " ON CONFLICT(username) DO UPDATE SET db_json = excluded.db_json",
+            (username, _serialize_db(db)),
+        )
+
+
+def _list_workbooks() -> list[dict[str, Any]]:
+    with _db_connection() as conn:
+        rows = conn.execute("""
+            SELECT u.username, u.username AS label, COALESCE(w.db_json, '{}') AS db_json
+            FROM users AS u
+            LEFT JOIN workbooks AS w ON w.username = u.username
+            ORDER BY u.username
+            """).fetchall()
+
+    return [
+        {
+            "id": row["username"],
+            "userId": row["username"],
+            "label": row["label"],
+            "db": _deserialize_db(row["db_json"]),
+        }
+        for row in rows
+    ]
+
+
+def _export_snapshot() -> dict[str, Any]:
+    return {
+        "exportedAt": _utc_now_iso(),
+        "app": "Dragonfly Tables",
+        "workbooks": _list_workbooks(),
+    }
 
 
 def _auth_username(handler: BaseHTTPRequestHandler) -> str | None:
@@ -203,16 +201,20 @@ def _auth_username(handler: BaseHTTPRequestHandler) -> str | None:
     if not header.startswith("Bearer "):
         return None
     token = header.removeprefix("Bearer ").strip()
-    state = _state()
-    session = state.get("sessions", {}).get(token)
-    if not session:
+    cutoff = _now() - SESSION_TTL_SECONDS
+
+    with _db_connection() as conn:
+        conn.execute("DELETE FROM sessions WHERE created_at < ?", (cutoff,))
+        row = conn.execute(
+            "SELECT username, created_at FROM sessions WHERE token = ?",
+            (token,),
+        ).fetchone()
+
+    if not row:
         return None
-    created_at = session.get("createdAt")
-    if not isinstance(created_at, (int, float)):
+    if float(row["created_at"]) < cutoff:
         return None
-    if float(created_at) < _now() - SESSION_TTL_SECONDS:
-        return None
-    return str(session.get("username", "")) or None
+    return str(row["username"])
 
 
 def _read_json(handler: BaseHTTPRequestHandler) -> dict[str, Any]:
@@ -268,41 +270,34 @@ def _login_or_register(handler: BaseHTTPRequestHandler, *, register: bool) -> No
         )
         return
 
-    with STATE_LOCK:
-        state = _load_state()
-        users = state.setdefault("users", {})
-        user = users.get(username)
+    if register:
+        try:
+            _create_user(username, password)
+        except ValueError as exc:
+            _error(handler, HTTPStatus.CONFLICT, str(exc))
+            return
+    else:
+        with _db_connection() as conn:
+            row = conn.execute(
+                "SELECT password_hash FROM users WHERE username = ?",
+                (username,),
+            ).fetchone()
+        if not row or not _verify_password(str(row["password_hash"]), password):
+            _error(handler, HTTPStatus.UNAUTHORIZED, "Login failed")
+            return
 
-        if register:
-            if user is not None:
-                _error(handler, HTTPStatus.CONFLICT, "Username already taken.")
-                return
-            users[username] = {
-                "passwordHash": _pbkdf2_hash(password),
-                "db": {},
-            }
-        else:
-            if not isinstance(user, dict):
-                _error(handler, HTTPStatus.UNAUTHORIZED, "Login failed")
-                return
-            stored_hash = str(user.get("passwordHash", ""))
-            if not _verify_password(stored_hash, password):
-                _error(handler, HTTPStatus.UNAUTHORIZED, "Login failed")
-                return
-
-        token = _create_session(state, username)
-        _write_state(state)
-        _send_json(
-            handler,
-            HTTPStatus.OK,
-            {
-                "token": token,
-                "record": {
-                    "id": username,
-                    "username": username,
-                },
+    token = _create_session(username)
+    _send_json(
+        handler,
+        HTTPStatus.OK,
+        {
+            "token": token,
+            "record": {
+                "id": username,
+                "username": username,
             },
-        )
+        },
+    )
 
 
 def _handle_workbooks(handler: BaseHTTPRequestHandler, method: str) -> None:
@@ -312,12 +307,11 @@ def _handle_workbooks(handler: BaseHTTPRequestHandler, method: str) -> None:
         return
 
     if method == "GET":
-        state = _state()
         _send_json(
             handler,
             HTTPStatus.OK,
             {
-                "items": _list_workbooks(state),
+                "items": _list_workbooks(),
                 "record": {"id": username, "username": username},
             },
         )
@@ -325,31 +319,44 @@ def _handle_workbooks(handler: BaseHTTPRequestHandler, method: str) -> None:
 
     if method in {"PUT", "PATCH", "POST"}:
         payload = _read_json(handler)
-        workbooks = payload.get("workbooks")
-        if not isinstance(workbooks, list):
-            _error(handler, HTTPStatus.BAD_REQUEST, "Missing workbooks array.")
+        workbook = payload.get("workbook")
+        if not isinstance(workbook, dict):
+            workbooks = payload.get("workbooks")
+            if isinstance(workbooks, list):
+                workbook = next(
+                    (
+                        item
+                        for item in workbooks
+                        if isinstance(item, dict)
+                        and str(item.get("userId") or item.get("id") or "").strip()
+                        == username
+                    ),
+                    None,
+                )
+
+        if not isinstance(workbook, dict):
+            _error(handler, HTTPStatus.BAD_REQUEST, "Missing workbook.")
             return
 
-        with STATE_LOCK:
-            state = _load_state()
-            users = state.setdefault("users", {})
-            # Only allow the authenticated user to modify their own workbook.
-            # Ignore any workbooks in the payload that target other users.
-            if username not in users:
-                _error(handler, HTTPStatus.UNAUTHORIZED, "Unauthorized")
-                return
-            for workbook in workbooks:
-                if not isinstance(workbook, dict):
-                    continue
-                db = workbook.get("db")
-                if isinstance(db, dict):
-                    users[username]["db"] = db
-            _write_state(state)
+        db = workbook.get("db")
+        if not isinstance(db, dict):
+            _error(handler, HTTPStatus.BAD_REQUEST, "Missing workbook data.")
+            return
 
+        _update_workbook(username, db)
         _send_json(handler, HTTPStatus.OK, {"ok": True})
         return
 
     _error(handler, HTTPStatus.METHOD_NOT_ALLOWED, "Method not allowed")
+
+
+def _handle_export(handler: BaseHTTPRequestHandler) -> None:
+    username = _auth_username(handler)
+    if not username:
+        _error(handler, HTTPStatus.UNAUTHORIZED, "Log in to export data.")
+        return
+
+    _send_json(handler, HTTPStatus.OK, _export_snapshot())
 
 
 def _serve_file(handler: BaseHTTPRequestHandler, relative_path: str) -> None:
@@ -366,7 +373,7 @@ def _serve_file(handler: BaseHTTPRequestHandler, relative_path: str) -> None:
 
 
 class DragonflyHandler(BaseHTTPRequestHandler):
-    server_version = "DragonflyTables/1.0"
+    server_version = "DragonflyTables/2.0"
 
     def log_message(self, format: str, *args: Any) -> None:  # noqa: A003
         return
@@ -388,6 +395,8 @@ class DragonflyHandler(BaseHTTPRequestHandler):
             return _serve_file(self, "simple_frontend.html")
         if path == "/input_table.html":
             return _serve_file(self, "input_table.html")
+        if path in {"/export.json", "/api/export.json"}:
+            return _handle_export(self)
         if path == "/api/workbooks":
             return _handle_workbooks(self, "GET")
         if path == "/api/me":
@@ -426,7 +435,7 @@ class DragonflyHandler(BaseHTTPRequestHandler):
 
 
 def main() -> None:
-    _state()
+    _ensure_db()
     server = ThreadingHTTPServer((DEFAULT_HOST, DEFAULT_PORT), DragonflyHandler)
     print(f"Serving Dragonfly Tables on http://{DEFAULT_HOST}:{DEFAULT_PORT}")
     try:

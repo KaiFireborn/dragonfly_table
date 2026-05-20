@@ -1,52 +1,47 @@
 #!/usr/bin/env python3
-"""Create a daily backup of data/user.json and keep the last 14 days.
+"""Create a daily backup of the SQLite database and keep the last 14 days."""
 
-Run this script from cron or a scheduler once per day.
-"""
+from __future__ import annotations
 
-from pathlib import Path
 import datetime
-import json
+import sqlite3
 import sys
+from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DATA_DIR = REPO_ROOT / "data"
-USER_FILE = DATA_DIR / "user.json"
+DB_FILE = DATA_DIR / "dragonfly.sqlite3"
 BACKUP_DIR = DATA_DIR / "backups"
 KEEP_DAYS = 14
 
 
-def main():
-    if not USER_FILE.exists():
-        print(f"User file not found: {USER_FILE}", file=sys.stderr)
+def main() -> int:
+    if not DB_FILE.exists():
+        print(f"Database file not found: {DB_FILE}", file=sys.stderr)
         return 2
 
     BACKUP_DIR.mkdir(parents=True, exist_ok=True)
 
-    now = datetime.datetime.utcnow()
+    now = datetime.datetime.now(datetime.timezone.utc)
     stamp = now.strftime("%Y%m%dT%H%M%SZ")
-    dest = BACKUP_DIR / f"users-{stamp}.json"
+    dest = BACKUP_DIR / f"dragonfly-{stamp}.sqlite3"
 
-    # Copy file contents (validate JSON but still write even if invalid)
-    content = USER_FILE.read_text(encoding="utf-8")
-    try:
-        json.loads(content)
-    except Exception as exc:
-        print(f"Warning: {USER_FILE} is not valid JSON: {exc}", file=sys.stderr)
+    with sqlite3.connect(DB_FILE) as source, sqlite3.connect(dest) as target:
+        source.backup(target)
 
-    dest.write_text(content, encoding="utf-8")
     print(f"Wrote backup: {dest}")
 
-    # Prune old backups
     cutoff = now - datetime.timedelta(days=KEEP_DAYS)
-    for p in sorted(BACKUP_DIR.glob("users-*.json")):
+    for path in sorted(BACKUP_DIR.glob("dragonfly-*.sqlite3")):
         try:
-            mtime = datetime.datetime.utcfromtimestamp(p.stat().st_mtime)
+            mtime = datetime.datetime.fromtimestamp(
+                path.stat().st_mtime, datetime.timezone.utc
+            )
             if mtime < cutoff:
-                p.unlink()
-                print(f"Removed old backup: {p}")
+                path.unlink()
+                print(f"Removed old backup: {path}")
         except Exception as exc:
-            print(f"Failed to consider {p}: {exc}", file=sys.stderr)
+            print(f"Failed to consider {path}: {exc}", file=sys.stderr)
 
     return 0
 

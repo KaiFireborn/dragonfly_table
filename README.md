@@ -1,6 +1,6 @@
 # Dragonfly Tables
 
-The app now stores everything in a single local JSON file at `data/user.json`.
+The app now stores data in a single local SQLite database at `data/dragonfly.sqlite3`.
 
 ## 1) Start the app
 
@@ -18,10 +18,10 @@ python server.py
 
 ## 2) Accounts and storage
 
-- User accounts and workbook data are stored together in `data/user.json`.
+- User accounts, sessions, and workbook data are stored in `data/dragonfly.sqlite3`.
 - Passwords are stored as PBKDF2-SHA256 hashes.
-- Existing seeded usernames are migrated with a default password equal to the username on first run.
 - New registrations use the password you type in the app.
+- If another user saves data, a reload will show their latest workbook rows.
 
 ## 3) Working with weeks
 
@@ -31,8 +31,8 @@ python server.py
 
 ## 4) Backups
 
-- Click **Export backup JSON** in the app to download the current loaded database as a JSON file.
-- For a full backup, copy `data/user.json`.
+- Click **Export JSON** in the app to download a fresh `export.json` snapshot from the server.
+- For a full backup, copy `data/dragonfly.sqlite3`.
 
 ## 5) Running it as a website
 
@@ -61,7 +61,7 @@ docker compose down
 
 ## Automated backups (daily)
 
-You can schedule daily backups of `data/user.json` using the included script `scripts/backup_users.py`.
+You can schedule daily backups of `data/dragonfly.sqlite3` using the included script `scripts/backup_users.py`.
 
 Example cron entry (runs daily at 03:00):
 
@@ -70,6 +70,6 @@ Example cron entry (runs daily at 03:00):
 0 3 * * * /home/kf/Files/Programming/dragonfly/.venv/bin/python /home/kf/Files/Programming/dragonfly/scripts/backup_users.py >> /home/kf/Files/Programming/dragonfly/backup.log 2>&1
 ```
 
-The script writes timestamped files into `data/backups/` and removes backups older than 14 days.
+The script writes timestamped `.sqlite3` files into `data/backups/` and removes backups older than 14 days.
 
 If you use `docker compose up` to run the app, a `backup` service is included in `docker-compose.yml` that runs the backup script once per day while the stack is up. The service shares the project volume so backups are written into `data/backups/` on the host.
