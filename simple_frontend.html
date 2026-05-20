@@ -60,6 +60,19 @@
         margin-top: 12px;
       }
 
+      #messageRow {
+        display: flex;
+        gap: 12px;
+        align-items: center;
+        flex-wrap: wrap;
+      }
+
+      #saveStatus {
+        min-height: 1.2em;
+        font-weight: 600;
+        color: #0f5a0f;
+      }
+
       section {
         margin-top: 18px;
       }
@@ -143,7 +156,10 @@
         <span>Logged in as <strong id="loggedInUsername"></strong></span>
         <button id="logoutBtn" type="button">Log out</button>
       </div>
-      <span id="message"></span>
+      <div id="messageRow">
+        <span id="message"></span>
+        <span id="saveStatus" aria-live="polite"></span>
+      </div>
     </div>
 
     <div>
@@ -210,6 +226,7 @@
       const createWeekBtn = document.getElementById("createWeekBtn");
       const backupBtn = document.getElementById("backupBtn");
       const messageEl = document.getElementById("message");
+      const saveStatusEl = document.getElementById("saveStatus");
       const tablesRoot = document.getElementById("tablesRoot");
 
       let auth = loadAuth();
@@ -217,6 +234,7 @@
       let currentWeek = "week1";
       let saveQueuePending = false;
       let saveQueuePromise = null;
+      let saveStatusTimer = null;
 
       function loadAuth() {
         try {
@@ -240,6 +258,7 @@
         clearAuth();
         workbooks = [];
         currentWeek = currentDateWeekLabel();
+        setSaveStatus("");
         setMessage(message || "Log in to load local data.");
         render();
       }
@@ -289,6 +308,21 @@
         messageEl.textContent = text;
       }
 
+      function setSaveStatus(text) {
+        if (saveStatusTimer) {
+          clearTimeout(saveStatusTimer);
+          saveStatusTimer = null;
+        }
+
+        saveStatusEl.textContent = text;
+        if (!text) return;
+
+        saveStatusTimer = window.setTimeout(() => {
+          saveStatusEl.textContent = "";
+          saveStatusTimer = null;
+        }, 2000);
+      }
+
       function guardAuthenticatedEdit() {
         if (currentUserId()) return true;
         const message = "Log in first.";
@@ -313,6 +347,10 @@
             db: workbook.db,
           },
         });
+      }
+
+      function markSavePending() {
+        if (currentUserId()) setSaveStatus("Saving...");
       }
 
       function currentUserId() {
@@ -823,6 +861,7 @@
                   if (!guardAuthenticatedEdit()) {
                     return;
                   }
+                  markSavePending();
                   const row = inputEl.closest("tr");
                   const exercise =
                     inputEl.dataset.exercise || row?.dataset.exercise || "";
@@ -950,11 +989,14 @@
         if (!response.ok) {
           throw new Error(result.message || "Could not save workbook");
         }
+
+        setSaveStatus("Saved!");
       }
 
       async function saveWorkbook() {
         if (!currentUserId()) return;
 
+        markSavePending();
         saveQueuePending = true;
         if (saveQueuePromise) return saveQueuePromise;
 
