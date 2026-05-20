@@ -215,6 +215,8 @@
       let auth = loadAuth();
       let workbooks = [];
       let currentWeek = "week1";
+      let saveQueuePending = false;
+      let saveQueuePromise = null;
 
       function loadAuth() {
         try {
@@ -302,6 +304,15 @@
         };
         if (auth?.token) headers.Authorization = `Bearer ${auth.token}`;
         return fetch(`${API_BASE}${path}`, { ...options, headers });
+      }
+
+      function workbookSavePayload(workbook) {
+        return JSON.stringify({
+          workbook: {
+            userId: workbook.userId,
+            db: workbook.db,
+          },
+        });
       }
 
       function currentUserId() {
@@ -921,18 +932,13 @@
         render();
       }
 
-      async function saveWorkbook() {
+      async function persistWorkbook() {
         const workbook = workbookForCurrentUser();
         if (!workbook) return;
 
         const response = await api("/api/workbooks", {
           method: "PUT",
-          body: JSON.stringify({
-            workbook: {
-              userId: workbook.userId,
-              db: workbook.db,
-            },
-          }),
+          body: workbookSavePayload(workbook),
         });
         const result = await response.json();
 
@@ -944,6 +950,40 @@
         if (!response.ok) {
           throw new Error(result.message || "Could not save workbook");
         }
+      }
+
+      async function saveWorkbook() {
+        if (!currentUserId()) return;
+
+        saveQueuePending = true;
+        if (saveQueuePromise) return saveQueuePromise;
+
+        saveQueuePromise = (async () => {
+          while (saveQueuePending) {
+            saveQueuePending = false;
+            await persistWorkbook();
+          }
+        })().finally(() => {
+          saveQueuePromise = null;
+        });
+
+        return saveQueuePromise;
+      }
+
+      function saveWorkbookOnExit() {
+        const workbook = workbookForCurrentUser();
+        if (!workbook || !auth?.token) return;
+
+        const body = workbookSavePayload(workbook);
+        fetch(`${API_BASE}/api/workbooks`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${auth.token}`,
+          },
+          body,
+          keepalive: true,
+        }).catch(() => {});
       }
 
       async function login(identityArg, passwordArg) {
@@ -1046,6 +1086,16 @@
 
       backupBtn.addEventListener("click", () => {
         exportBackup();
+      });
+
+      window.addEventListener("pagehide", () => {
+        saveWorkbookOnExit();
+      });
+
+      window.addEventListener("visibilitychange", () => {
+        if (document.visibilityState === "hidden") {
+          saveWorkbookOnExit();
+        }
       });
 
       if (auth?.record?.username) {
