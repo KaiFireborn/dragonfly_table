@@ -182,7 +182,13 @@
         "saturday",
         "sunday",
       ];
-      const exercises = ["Liegestütze", "Klimmzüge", "Crunch", "Custom1", "Custom2"];
+      const exercises = [
+        "Liegestütze",
+        "Klimmzüge",
+        "Crunch",
+        "Custom1",
+        "Custom2",
+      ];
       const dayLabels = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
       const performanceColumns = ["Sum", "%", "Weighted", "Mean", "SD"];
 
@@ -255,7 +261,7 @@
         URL.revokeObjectURL(url);
       }
 
-      function exportBackup() {
+      async function exportBackup() {
         const response = await api("/export.json");
         const text = await response.text();
         if (response.status === 401) {
