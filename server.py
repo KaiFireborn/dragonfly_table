@@ -333,17 +333,17 @@ def _handle_workbooks(handler: BaseHTTPRequestHandler, method: str) -> None:
         with STATE_LOCK:
             state = _load_state()
             users = state.setdefault("users", {})
+            # Only allow the authenticated user to modify their own workbook.
+            # Ignore any workbooks in the payload that target other users.
+            if username not in users:
+                _error(handler, HTTPStatus.UNAUTHORIZED, "Unauthorized")
+                return
             for workbook in workbooks:
                 if not isinstance(workbook, dict):
                     continue
-                user_id = str(
-                    workbook.get("userId") or workbook.get("id") or ""
-                ).strip()
-                if not user_id or user_id not in users:
-                    continue
                 db = workbook.get("db")
                 if isinstance(db, dict):
-                    users[user_id]["db"] = db
+                    users[username]["db"] = db
             _write_state(state)
 
         _send_json(handler, HTTPStatus.OK, {"ok": True})
