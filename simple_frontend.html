@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta
       name="description"
-      content="Dragonfly Tables helps track weekly exercise goals with local JSON-backed storage."
+      content="Dragonfly Tables helps track weekly exercise goals with local SQLite-backed storage."
     />
     <meta name="theme-color" content="#ffffff" />
     <title>Dragonfly Tables</title>
@@ -48,6 +48,11 @@
         text-align: right;
         -moz-appearance: textfield;
         appearance: textfield;
+      }
+
+      .exercise-name-input {
+        width: 12ch;
+        max-width: 100%;
       }
 
       input[type="number"]::-webkit-inner-spin-button,
@@ -130,7 +135,7 @@
     </style>
   </head>
   <body>
-    <h1>Input Tables</h1>
+    <h1>Dragonfly Tables</h1>
 
     <div>
       <div id="authForm">
@@ -160,7 +165,7 @@
       /> -->
       <!-- <button id="createCustomWeekBtn" type="button">Create custom week</button> -->
       <button id="createWeekBtn" type="button">Create current week</button>
-      <button id="backupBtn" type="button">Export backup JSON</button>
+      <button id="backupBtn" type="button">Export JSON</button>
     </div>
 
     <div id="tablesRoot"></div>
@@ -182,7 +187,13 @@
         "saturday",
         "sunday",
       ];
-      const exercises = ["Push-up", "Pull-up", "Crunch", "Custom1", "Custom2"];
+      const exercises = [
+        "Liegestütze",
+        "Klimmzüge",
+        "Crunch",
+        "Custom1",
+        "Custom2",
+      ];
       const dayLabels = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
       const performanceColumns = ["Sum", "%", "Weighted", "Mean", "SD"];
 
@@ -255,29 +266,26 @@
         URL.revokeObjectURL(url);
       }
 
-      function exportBackup() {
-        const backup = {
-          exportedAt: new Date().toISOString(),
-          app: "Dragonfly Tables",
-          currentWeek,
-          weeks: sortWeeks(allWeeks()),
-          workbooks: workbooks.map((workbook) => ({
-            id: workbook.id,
-            userId: workbook.userId,
-            label: workbook.label,
-            db: workbook.db,
-          })),
-        };
+      async function exportBackup() {
+        const response = await api("/export.json");
+        const text = await response.text();
+        if (response.status === 401) {
+          resetLoggedOutState("Session expired. Log in again.");
+          return;
+        }
+        if (!response.ok) {
+          let message = "Could not export JSON";
+          try {
+            const result = JSON.parse(text);
+            message = result.message || message;
+          } catch {
+            // Keep fallback message.
+          }
+          throw new Error(message);
+        }
 
-        const stamp = new Date()
-          .toISOString()
-          .replaceAll(":", "-")
-          .replaceAll(".", "-");
-        downloadTextFile(
-          `dragonfly-backup-${stamp}.json`,
-          JSON.stringify(backup, null, 2),
-        );
-        setMessage("Backup JSON downloaded.");
+        downloadTextFile("export.json", text);
+        setMessage("export.json downloaded.");
       }
 
       function setMessage(text) {
@@ -319,7 +327,12 @@
             id: null,
             userId,
             label: currentUsername(),
-            db: {},
+            db: {
+              __customNames: {
+                Custom1: "Custom1",
+                Custom2: "Custom2",
+              },
+            },
             editable: true,
           };
           workbooks.unshift(workbook);
@@ -327,7 +340,24 @@
 
         workbook.editable = true;
         workbook.label = currentUsername();
+        ensureCustomNames(workbook);
         return workbook;
+      }
+
+      function ensureCustomNames(workbook) {
+        if (!workbook.db.__customNames) {
+          workbook.db.__customNames = {
+            Custom1: "Custom1",
+            Custom2: "Custom2",
+          };
+        }
+      }
+
+      function getExerciseName(exercise, workbook) {
+        if (exercise === "Custom1" || exercise === "Custom2") {
+          return workbook.db?.__customNames?.[exercise] || exercise;
+        }
+        return exercise;
       }
 
       function allWeeks() {
@@ -490,7 +520,7 @@
         const weight =
           weightRaw === "" || weightRaw === undefined
             ? null
-            : Number(weightRaw);
+            : weightToNumber(weightRaw);
         const hasGoal = Number.isFinite(goal) && goal > 0;
         const hasWeight = Number.isFinite(weight);
         const percentage = hasGoal ? (sum / goal) * 100 : null;
@@ -632,8 +662,10 @@
       }
 
       function buildTable(workbook) {
+        ensureCustomNames(workbook);
         const rows = exercises
           .map((exercise) => {
+            const displayName = getExerciseName(exercise, workbook);
             const stats = getExerciseStats(workbook, exercise);
             const performanceCells = performanceColumns
               .map((_, index) => renderPerformanceCell(index, stats))
@@ -654,7 +686,19 @@
                 return `<td><input type="number" name="${exercise}_${day}" value="${value}" ${disabled} /></td>`;
               })
               .join("");
-            return `<tr data-exercise="${exercise}"><td>${exercise}</td>${weightCell}${goalCell}${cells}${performanceCells}</tr>`;
+
+            let exerciseCell;
+            if (
+              (exercise === "Custom1" || exercise === "Custom2") &&
+              workbook.editable
+            ) {
+              const nameValue = displayName;
+              exerciseCell = `<td><input type="text" name="${exercise}_name" value="${nameValue}" class="exercise-name-input" /></td>`;
+            } else {
+              exerciseCell = `<td>${displayName}</td>`;
+            }
+
+            return `<tr data-exercise="${exercise}">${exerciseCell}${weightCell}${goalCell}${cells}${performanceCells}</tr>`;
           })
           .join("");
 
@@ -739,6 +783,7 @@
         const text = String(rawValue ?? "").trim();
         if (text === "") return "";
 
+        // Validate format: fractions or decimals allowed
         const ratio = text.match(
           /^([-+]?\d+(?:\.\d+)?)\s*\/\s*([-+]?\d+(?:\.\d+)?)$/,
         );
@@ -747,6 +792,25 @@
           const denominator = Number(ratio[2]);
           if (!Number.isFinite(numerator) || !Number.isFinite(denominator))
             return null;
+          if (denominator === 0) return null;
+          return text; // Store the original fraction string
+        }
+
+        const numeric = Number(text);
+        if (!Number.isFinite(numeric)) return null;
+        return text; // Store the original numeric string
+      }
+
+      function weightToNumber(weightValue) {
+        const text = String(weightValue ?? "").trim();
+        if (text === "") return null;
+
+        const ratio = text.match(
+          /^([-+]?\d+(?:\.\d+)?)\s*\/\s*([-+]?\d+(?:\.\d+)?)$/,
+        );
+        if (ratio) {
+          const numerator = Number(ratio[1]);
+          const denominator = Number(ratio[2]);
           if (denominator === 0) return null;
           return numerator / denominator;
         }
@@ -790,8 +854,24 @@
                     return;
                   }
                   const row = inputEl.closest("tr");
-                  const [exercise, day] = inputEl.name.split("_");
+                  const [exercise, ...rest] = inputEl.name.split("_");
+                  const day = rest.join("_");
                   let value;
+
+                  if (day === "name") {
+                    workbook.db.__customNames[exercise] =
+                      inputEl.value || exercise;
+                    if (row) {
+                      const nameCell = row.querySelector("td");
+                      if (nameCell)
+                        nameCell.textContent = inputEl.value || exercise;
+                    }
+                    saveWorkbook().catch((error) =>
+                      setMessage(error.message || "Save failed"),
+                    );
+                    return;
+                  }
+
                   if (day === "weight") {
                     value = parseWeightValue(inputEl.value);
                     if (value === null) {
@@ -814,6 +894,9 @@
                   if (!guardAuthenticatedEdit()) return;
                   const raw = String(inputEl.value ?? "");
                   const name = inputEl.name || "";
+
+                  if (name.endsWith("_name")) return;
+
                   const isWeight =
                     name.endsWith("_weight") ||
                     inputEl.classList.contains("weight-input");
@@ -878,13 +961,17 @@
           throw new Error(result.message || "Could not load workbooks");
         }
 
-        workbooks = (result.items || []).map((record) => ({
-          id: record.id,
-          userId: record.userId,
-          label: record.label || record.userId,
-          db: record.db || {},
-          editable: false,
-        }));
+        workbooks = (result.items || []).map((record) => {
+          const wb = {
+            id: record.id,
+            userId: record.userId,
+            label: record.label || record.userId,
+            db: record.db || {},
+            editable: false,
+          };
+          ensureCustomNames(wb);
+          return wb;
+        });
 
         workbookForCurrentUser();
         const targetWeek = currentDateWeekLabel();
@@ -903,10 +990,10 @@
         const response = await api("/api/workbooks", {
           method: "PUT",
           body: JSON.stringify({
-            workbooks: workbooks.map((item) => ({
-              userId: item.userId,
-              db: item.db,
-            })),
+            workbook: {
+              userId: workbook.userId,
+              db: workbook.db,
+            },
           }),
         });
         const result = await response.json();
