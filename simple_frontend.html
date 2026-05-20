@@ -644,17 +644,17 @@
             const weightValue =
               workbook.db?.[currentWeek]?.[exercise]?.weight ?? "";
             const weightDisabled = workbook.editable ? "" : "disabled";
-            const weightCell = `<td class="weight-col"><input class="weight-input" type="text" inputmode="decimal" name="${exercise}_weight" value="${weightValue}" ${weightDisabled} /></td>`;
+            const weightCell = `<td class="weight-col"><input class="weight-input" type="text" inputmode="decimal" name="${exercise}_weight" data-exercise="${exercise}" data-field="weight" value="${weightValue}" ${weightDisabled} /></td>`;
             const goalValue =
               workbook.db?.[currentWeek]?.[exercise]?.goal ?? "";
             const goalDisabled = workbook.editable ? "" : "disabled";
-            const goalCell = `<td class="goal-col"><input type="number" name="${exercise}_goal" value="${goalValue}" ${goalDisabled} /></td>`;
+            const goalCell = `<td class="goal-col"><input type="number" name="${exercise}_goal" data-exercise="${exercise}" data-field="goal" value="${goalValue}" ${goalDisabled} /></td>`;
             const cells = days
               .map((day) => {
                 const value =
                   workbook.db?.[currentWeek]?.[exercise]?.[day] ?? "";
                 const disabled = workbook.editable ? "" : "disabled";
-                return `<td><input type="number" name="${exercise}_${day}" value="${value}" ${disabled} /></td>`;
+                return `<td><input type="number" name="${exercise}_${day}" data-exercise="${exercise}" data-field="${day}" value="${value}" ${disabled} /></td>`;
               })
               .join("");
             return `<tr data-exercise="${exercise}"><td>${exercise}</td>${weightCell}${goalCell}${cells}${performanceCells}</tr>`;
@@ -813,7 +813,9 @@
                     return;
                   }
                   const row = inputEl.closest("tr");
-                  const [exercise, day] = inputEl.name.split("_");
+                  const exercise =
+                    inputEl.dataset.exercise || row?.dataset.exercise || "";
+                  const day = inputEl.dataset.field || "";
                   let value;
                   if (day === "weight") {
                     value = parseWeightValue(inputEl.value);
