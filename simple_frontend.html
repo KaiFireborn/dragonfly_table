@@ -493,7 +493,7 @@
         const weight =
           weightRaw === "" || weightRaw === undefined
             ? null
-            : Number(weightRaw);
+            : weightToNumber(weightRaw);
         const hasGoal = Number.isFinite(goal) && goal > 0;
         const hasWeight = Number.isFinite(weight);
         const percentage = hasGoal ? (sum / goal) * 100 : null;
@@ -742,6 +742,7 @@
         const text = String(rawValue ?? "").trim();
         if (text === "") return "";
 
+        // Validate format: fractions or decimals allowed
         const ratio = text.match(
           /^([-+]?\d+(?:\.\d+)?)\s*\/\s*([-+]?\d+(?:\.\d+)?)$/,
         );
@@ -750,6 +751,25 @@
           const denominator = Number(ratio[2]);
           if (!Number.isFinite(numerator) || !Number.isFinite(denominator))
             return null;
+          if (denominator === 0) return null;
+          return text; // Store the original fraction string
+        }
+
+        const numeric = Number(text);
+        if (!Number.isFinite(numeric)) return null;
+        return text; // Store the original numeric string
+      }
+
+      function weightToNumber(weightValue) {
+        const text = String(weightValue ?? "").trim();
+        if (text === "") return null;
+
+        const ratio = text.match(
+          /^([-+]?\d+(?:\.\d+)?)\s*\/\s*([-+]?\d+(?:\.\d+)?)$/,
+        );
+        if (ratio) {
+          const numerator = Number(ratio[1]);
+          const denominator = Number(ratio[2]);
           if (denominator === 0) return null;
           return numerator / denominator;
         }
